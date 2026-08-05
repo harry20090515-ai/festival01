@@ -8,6 +8,7 @@ import { MapView } from './components/MapView';
 import { BookmarkDrawer } from './components/BookmarkDrawer';
 import { FestivalItem, FilterState, ViewMode } from './types';
 import { parseFestivalDates, isFestivalInMonth, isFestivalOnDate } from './utils/dateUtils';
+import { FALLBACK_FESTIVALS } from './data/fallbackFestivals';
 import { Sparkles, Calendar, MapPin, Search, RefreshCw, AlertCircle } from 'lucide-react';
 
 export default function App() {
@@ -51,33 +52,97 @@ export default function App() {
     }
   }, [bookmarks]);
 
-  // Fetch data from Express proxy API
+  // Fetch data with robust multi-layer fallback for Vercel/production
   const fetchFestivals = async () => {
     setIsLoading(true);
     setError(null);
+    let loadedData: FestivalItem[] | null = null;
+    let sourceTag = 'API';
+
+    // Layer 1: Try Serverless API Proxy (/api/festivals)
     try {
       const response = await fetch('/api/festivals?numOfRows=300');
-      if (!response.ok) {
-        throw new Error(`서버 응답 오류 (HTTP ${response.status})`);
+      if (response.ok) {
+        const contentType = response.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const data = await response.json();
+          if (data && data.status === 'SUCCESS' && Array.isArray(data.items) && data.items.length > 0) {
+            loadedData = data.items;
+            sourceTag = data.source || 'API';
+          }
+        }
       }
-      const contentType = response.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-        throw new Error("서버 응답이 JSON 형식이 아닙니다.");
-      }
-      const data = await response.json();
-
-      if (data.status === 'SUCCESS' && Array.isArray(data.items)) {
-        setFestivals(data.items);
-        setDataSource(data.source || 'API');
-      } else {
-        throw new Error('데이터 구조가 올바르지 않습니다.');
-      }
-    } catch (err: any) {
-      console.error('Fetch error:', err);
-      setError('부산 축제 정보를 불러오는 중 오류가 발생했습니다.');
-    } finally {
-      setIsLoading(false);
+    } catch (e) {
+      console.warn('Backend proxy fetch failed, trying direct client fetch:', e);
     }
+
+    // Layer 2: Direct client fetch to data.go.kr if Layer 1 failed
+    if (!loadedData || loadedData.length === 0) {
+      try {
+        const rawKey = (import.meta as any).env?.VITE_BUSAN_FESTIVAL_SERVICE_KEY || 
+          "w3HMvXhq7mQTBUGR/DJjzvJNJd7ulxWoTsADBgJtayp/bVlHqvUNA6WRtsvv6sIIiu8mj5zYpRE6owlZz4jivw==";
+        
+        let keyParam = rawKey.trim();
+        if (!keyParam.includes('%')) {
+          keyParam = encodeURIComponent(keyParam);
+        }
+
+        const directUrl = `https://apis.data.go.kr/6260000/FestivalService/getFestivalKr?serviceKey=${keyParam}&pageNo=1&numOfRows=300&resultType=json`;
+        const directRes = await fetch(directUrl);
+        if (directRes.ok) {
+          const text = await directRes.text();
+          const json = JSON.parse(text);
+          const fetchedItems = json?.getFestivalKr?.item || [];
+          if (Array.isArray(fetchedItems) && fetchedItems.length > 0) {
+            const normalized: FestivalItem[] = fetchedItems.map((item: any, idx: number) => ({
+              UC_SEQ: item.UC_SEQ || `api-${idx}`,
+              TITLE: item.MAIN_TITLE || item.TITLE || "부산 축제",
+              GUGUN_NM: item.GUGUN_NM || "부산 전체",
+              LAT: Number(item.LAT || item.MAPY) || 35.1795543,
+              LNG: Number(item.LNG || item.MAPX) || 129.0756416,
+              PLACE: item.PLACE || item.MAIN_PLACE || item.ADDR1 || "부산",
+              MAIN_PLACE: item.MAIN_PLACE || item.PLACE,
+              ADDR1: item.ADDR1 || "",
+              ADDR2: item.ADDR2 || "",
+              CNTCT_TEL: item.CNTCT_TEL || "",
+              HOMEPAGE_URL: item.HOMEPAGE_URL || "",
+              TRFC_INFO: item.TRFC_INFO || "",
+              USAGE_DAY: item.USAGE_DAY || "",
+              USAGE_DAY_WEEK_AND_TIME: item.USAGE_DAY_WEEK_AND_TIME || item.USAGE_DAY || "",
+              USAGE_AMOUNT: item.USAGE_AMOUNT || "무료/상세참조",
+              MAIN_IMG_NORMAL: item.MAIN_IMG_NORMAL || item.MAIN_IMG_THUMB || "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=1200&auto=format&fit=crop",
+              MAIN_IMG_THUMB: item.MAIN_IMG_THUMB || item.MAIN_IMG_NORMAL || "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=400&auto=format&fit=crop",
+              ITEMCNTNTS: item.ITEMCNTNTS || item.MIDDLE_SIZE_RM1 || "부산의 아름다운 풍경과 열정이 함께하는 문화 축제입니다.",
+              MIDDLE_SIZE_RM1: item.MIDDLE_SIZE_RM1 || "",
+              category: item.CATE1_NM || item.CATE2_NM || "축제/행사"
+            }));
+            
+            // Merge with local dataset
+            const existingSeq = new Set(normalized.map((i) => String(i.UC_SEQ)));
+            const combined = [...normalized];
+            for (const fb of FALLBACK_FESTIVALS) {
+              if (!existingSeq.has(String(fb.UC_SEQ))) {
+                combined.push(fb);
+              }
+            }
+            loadedData = combined;
+            sourceTag = 'DIRECT_API';
+          }
+        }
+      } catch (e) {
+        console.warn('Direct client fetch failed, using fallback dataset:', e);
+      }
+    }
+
+    // Layer 3: Static fallback dataset
+    if (!loadedData || loadedData.length === 0) {
+      loadedData = FALLBACK_FESTIVALS;
+      sourceTag = 'FALLBACK';
+    }
+
+    setFestivals(loadedData);
+    setDataSource(sourceTag);
+    setIsLoading(false);
   };
 
   useEffect(() => {
