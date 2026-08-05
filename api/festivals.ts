@@ -15,6 +15,7 @@ export default async function handler(req: any, res: any) {
     const rawKey = process.env.BUSAN_FESTIVAL_SERVICE_KEY || 
       "w3HMvXhq7mQTBUGR/DJjzvJNJd7ulxWoTsADBgJtayp/bVlHqvUNA6WRtsvv6sIIiu8mj5zYpRE6owlZz4jivw==";
 
+    // Determine clean key (decode if URL encoded)
     let cleanKey = rawKey;
     try {
       if (rawKey.includes('%')) {
@@ -27,18 +28,37 @@ export default async function handler(req: any, res: any) {
     const numOfRows = req.query?.numOfRows || 200;
     const pageNo = req.query?.pageNo || 1;
 
+    // Use AbortController for 4.5s timeout to prevent Vercel function 10s execution timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4500);
+
     const apiUrl = `https://apis.data.go.kr/6260000/FestivalService/getFestivalKr?serviceKey=${encodeURIComponent(cleanKey)}&pageNo=${pageNo}&numOfRows=${numOfRows}&resultType=json`;
 
     console.log(`[API Proxy] Fetching Busan Festivals from data.go.kr...`);
 
-    const apiResponse = await fetch(apiUrl, {
-      headers: {
-        'Accept': 'application/json, text/plain, */*'
-      }
-    });
+    let apiResponse: any = null;
+    try {
+      apiResponse = await fetch(apiUrl, {
+        headers: {
+          'Accept': 'application/json, text/plain, */*'
+        },
+        signal: controller.signal
+      });
+    } catch (fetchErr: any) {
+      console.warn(`[API Proxy] Fetch failed or timed out: ${fetchErr.message}`);
+      clearTimeout(timeoutId);
+      return res.status(200).json({
+        status: "SUCCESS",
+        source: "FALLBACK",
+        count: FALLBACK_FESTIVALS.length,
+        items: FALLBACK_FESTIVALS
+      });
+    }
 
-    if (!apiResponse.ok) {
-      console.warn(`[API Proxy] Data API returned HTTP ${apiResponse.status}, serving combined dataset.`);
+    clearTimeout(timeoutId);
+
+    if (!apiResponse || !apiResponse.ok) {
+      console.warn(`[API Proxy] Data API returned non-OK status, serving fallback data.`);
       return res.status(200).json({
         status: "SUCCESS",
         source: "FALLBACK",
@@ -69,8 +89,8 @@ export default async function handler(req: any, res: any) {
         UC_SEQ: item.UC_SEQ || `api-${idx}`,
         TITLE: item.MAIN_TITLE || item.TITLE || "부산 축제",
         GUGUN_NM: item.GUGUN_NM || "부산 전체",
-        LAT: item.LAT || item.MAPY || 35.1795543,
-        LNG: item.LNG || item.MAPX || 129.0756416,
+        LAT: Number(item.LAT || item.MAPY) || 35.1795543,
+        LNG: Number(item.LNG || item.MAPX) || 129.0756416,
         PLACE: item.PLACE || item.MAIN_PLACE || item.ADDR1 || "부산",
         MAIN_PLACE: item.MAIN_PLACE || item.PLACE,
         ADDR1: item.ADDR1 || "",
@@ -112,7 +132,7 @@ export default async function handler(req: any, res: any) {
     }
 
   } catch (error: any) {
-    console.error(`[API Proxy Error]:`, error);
+    console.error(`[API Proxy Critical Error]:`, error);
     return res.status(200).json({
       status: "SUCCESS",
       source: "FALLBACK",

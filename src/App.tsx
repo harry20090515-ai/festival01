@@ -57,6 +57,13 @@ export default function App() {
     setError(null);
     try {
       const response = await fetch('/api/festivals?numOfRows=300');
+      if (!response.ok) {
+        throw new Error(`서버 응답 오류 (HTTP ${response.status})`);
+      }
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error("서버 응답이 JSON 형식이 아닙니다.");
+      }
       const data = await response.json();
 
       if (data.status === 'SUCCESS' && Array.isArray(data.items)) {
